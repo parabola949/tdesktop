@@ -7,12 +7,9 @@ https://github.com/telegramdesktop/tdesktop/blob/master/LEGAL
 */
 #include "window/window_title_qt.h"
 
-#include "platform/platform_specific.h"
 #include "ui/platform/ui_platform_utility.h"
 #include "ui/widgets/buttons.h"
 #include "ui/widgets/shadow.h"
-#include "core/core_settings.h"
-#include "core/application.h"
 #include "styles/style_widgets.h"
 #include "styles/style_window.h"
 
@@ -25,6 +22,16 @@ namespace {
 
 [[nodiscard]] style::margins ShadowExtents() {
 	return st::callShadow.extend;
+}
+
+template <typename T>
+void RemoveDuplicates(std::vector<T> &v) {
+	auto end = v.end();
+	for (auto it = v.begin(); it != end; ++it) {
+		end = std::remove(it + 1, end, *it);
+	}
+
+	v.erase(end, v.end());
 }
 
 } // namespace
@@ -56,7 +63,7 @@ TitleWidgetQt::TitleWidgetQt(QWidget *parent)
 	});
 	_close->setPointerCursor(false);
 
-	Core::App().settings().windowControlsLayoutChanges(
+	Ui::Platform::TitleControlsLayoutChanged(
 	) | rpl::start_with_next([=] {
 		updateControlsPosition();
 	}, lifetime());
@@ -84,7 +91,7 @@ TitleWidgetQt::~TitleWidgetQt() {
 	}
 
 	if (_extentsSet) {
-		Platform::UnsetWindowExtents(window()->windowHandle());
+		Ui::Platform::UnsetWindowExtents(window()->windowHandle());
 	}
 }
 
@@ -106,8 +113,18 @@ void TitleWidgetQt::init() {
 
 bool TitleWidgetQt::hasShadow() const {
 	const auto center = window()->geometry().center();
-	return Platform::WindowsNeedShadow()
+	return Ui::Platform::WindowExtentsSupported()
 		&& Ui::Platform::TranslucentWindowsSupported(center);
+}
+
+Ui::IconButton *TitleWidgetQt::controlWidget(Control control) const {
+	switch (control) {
+	case Control::Minimize: return _minimize;
+	case Control::Maximize: return _maximizeRestore;
+	case Control::Close: return _close;
+	}
+
+	return nullptr;
 }
 
 void TitleWidgetQt::paintEvent(QPaintEvent *e) {
@@ -125,38 +142,40 @@ void TitleWidgetQt::toggleFramelessWindow(bool enabled) {
 
 void TitleWidgetQt::updateWindowExtents() {
 	if (hasShadow()) {
-		Platform::SetWindowExtents(
+		Ui::Platform::SetWindowExtents(
 			window()->windowHandle(),
-			resizeArea());
+			resizeArea() * cIntRetinaFactor());
 
 		_extentsSet = true;
 	} else if (_extentsSet) {
-		Platform::UnsetWindowExtents(window()->windowHandle());
+		Ui::Platform::UnsetWindowExtents(window()->windowHandle());
 		_extentsSet = false;
 	}
 }
 
 void TitleWidgetQt::updateControlsPosition() {
-	const auto controlsLayout = Core::App().settings().windowControlsLayout();
+	const auto controlsLayout = Ui::Platform::TitleControlsLayout();
 	const auto controlsLeft = controlsLayout.left;
 	const auto controlsRight = controlsLayout.right;
 
-	if (ranges::contains(controlsLeft, Control::Minimize)
-		|| ranges::contains(controlsRight, Control::Minimize)) {
+	const auto controlPresent = [&](Control control) {
+		return ranges::contains(controlsLeft, control)
+		|| ranges::contains(controlsRight, control);
+	};
+
+	if (controlPresent(Control::Minimize)) {
 		_minimize->show();
 	} else {
 		_minimize->hide();
 	}
 
-	if (ranges::contains(controlsLeft, Control::Maximize)
-		|| ranges::contains(controlsRight, Control::Maximize)) {
+	if (controlPresent(Control::Maximize)) {
 		_maximizeRestore->show();
 	} else {
 		_maximizeRestore->hide();
 	}
 
-	if (ranges::contains(controlsLeft, Control::Close)
-		|| ranges::contains(controlsRight, Control::Close)) {
+	if (controlPresent(Control::Close)) {
 		_close->show();
 	} else {
 		_close->hide();
@@ -169,41 +188,26 @@ void TitleWidgetQt::updateControlsPosition() {
 void TitleWidgetQt::updateControlsPositionBySide(
 		const std::vector<Control> &controls,
 		bool right) {
-	const auto preparedControls = right
+	auto preparedControls = right
 		? (ranges::view::reverse(controls) | ranges::to_vector)
 		: controls;
 
+	RemoveDuplicates(preparedControls);
+
 	auto position = 0;
 	for (const auto &control : preparedControls) {
-		switch (control) {
-		case Control::Minimize:
-			if (right) {
-				_minimize->moveToRight(position, 0);
-			} else {
-				_minimize->moveToLeft(position, 0);
-			}
-
-			position += _minimize->width();
-			break;
-		case Control::Maximize:
-			if (right) {
-				_maximizeRestore->moveToRight(position, 0);
-			} else {
-				_maximizeRestore->moveToLeft(position, 0);
-			}
-
-			position += _maximizeRestore->width();
-			break;
-		case Control::Close:
-			if (right) {
-				_close->moveToRight(position, 0);
-			} else {
-				_close->moveToLeft(position, 0);
-			}
-
-			position += _close->width();
-			break;
+		const auto widget = controlWidget(control);
+		if (!widget) {
+			continue;
 		}
+
+		if (right) {
+			widget->moveToRight(position, 0);
+		} else {
+			widget->moveToLeft(position, 0);
+		}
+
+		position += widget->width();
 	}
 }
 
@@ -216,7 +220,7 @@ void TitleWidgetQt::mousePressEvent(QMouseEvent *e) {
 	if (e->button() == Qt::LeftButton) {
 		_mousePressed = true;
 	} else if (e->button() == Qt::RightButton) {
-		Platform::ShowWindowMenu(window()->windowHandle());
+		Ui::Platform::ShowWindowMenu(window()->windowHandle());
 	}
 }
 
@@ -228,7 +232,7 @@ void TitleWidgetQt::mouseReleaseEvent(QMouseEvent *e) {
 
 void TitleWidgetQt::mouseMoveEvent(QMouseEvent *e) {
 	if (_mousePressed) {
-		startMove();
+		window()->windowHandle()->startSystemMove();
 	}
 }
 
@@ -257,7 +261,7 @@ bool TitleWidgetQt::eventFilter(QObject *obj, QEvent *e) {
 			if (e->type() == QEvent::MouseButtonPress
 				&& mouseEvent->button() == Qt::LeftButton
 				&& edges) {
-				return startResize(edges);
+				return window()->windowHandle()->startSystemResize(edges);
 			}
 		}
 	} else if (e->type() == QEvent::Leave) {
@@ -344,29 +348,33 @@ QMargins TitleWidgetQt::resizeArea() const {
 }
 
 Qt::Edges TitleWidgetQt::edgesFromPos(const QPoint &pos) const {
-	if (pos.x() <= resizeArea().left()) {
-		if (pos.y() <= resizeArea().top()) {
+	const auto area = resizeArea();
+
+	if (area.isNull()) {
+		return Qt::Edges();
+	} else if (pos.x() <= area.left()) {
+		if (pos.y() <= area.top()) {
 			return Qt::LeftEdge | Qt::TopEdge;
-		} else if (pos.y() >= (window()->height() - resizeArea().bottom())) {
+		} else if (pos.y() >= (window()->height() - area.bottom())) {
 			return Qt::LeftEdge | Qt::BottomEdge;
 		}
 
 		return Qt::LeftEdge;
-	} else if (pos.x() >= (window()->width() - resizeArea().right())) {
-		if (pos.y() <= resizeArea().top()) {
+	} else if (pos.x() >= (window()->width() - area.right())) {
+		if (pos.y() <= area.top()) {
 			return Qt::RightEdge | Qt::TopEdge;
-		} else if (pos.y() >= (window()->height() - resizeArea().bottom())) {
+		} else if (pos.y() >= (window()->height() - area.bottom())) {
 			return Qt::RightEdge | Qt::BottomEdge;
 		}
 
 		return Qt::RightEdge;
-	} else if (pos.y() <= resizeArea().top()) {
+	} else if (pos.y() <= area.top()) {
 		return Qt::TopEdge;
-	} else if (pos.y() >= (window()->height() - resizeArea().bottom())) {
+	} else if (pos.y() >= (window()->height() - area.bottom())) {
 		return Qt::BottomEdge;
-	} else {
-		return Qt::Edges();
 	}
+
+	return Qt::Edges();
 }
 
 void TitleWidgetQt::updateCursor(Qt::Edges edges) {
@@ -400,34 +408,6 @@ void TitleWidgetQt::restoreCursor() {
 		_cursorOverriden = false;
 		QGuiApplication::restoreOverrideCursor();
 	}
-}
-
-bool TitleWidgetQt::startMove() {
-	if (Platform::StartSystemMove(window()->windowHandle())) {
-		return true;
-	}
-
-#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0) || defined DESKTOP_APP_QT_PATCHED
-	if (window()->windowHandle()->startSystemMove()) {
-		return true;
-	}
-#endif // Qt >= 5.15 || DESKTOP_APP_QT_PATCHED
-
-	return false;
-}
-
-bool TitleWidgetQt::startResize(Qt::Edges edges) {
-	if (Platform::StartSystemResize(window()->windowHandle(), edges)) {
-		return true;
-	}
-
-#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0) || defined DESKTOP_APP_QT_PATCHED
-	if (window()->windowHandle()->startSystemResize(edges)) {
-		return true;
-	}
-#endif // Qt >= 5.15 || DESKTOP_APP_QT_PATCHED
-
-	return false;
 }
 
 } // namespace Window
